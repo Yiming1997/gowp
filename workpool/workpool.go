@@ -25,6 +25,68 @@ func New(max int) *WorkPool { // 注册工作池，并设置最大并发数
 	return p
 }
 
+func New2(max int) *WorkPool { // 注册工作池，并设置最大并发数
+	if max < 1 {
+		max = 1
+	}
+
+	p := &WorkPool{
+		task:         make(chan TaskHandler, 2*max),
+		errChan:      make(chan error, 1),
+		waitingQueue: myqueue.New(),
+	}
+	p.wg.Add(max) // Maximum number of work cycles,最大的工作协程数
+	go p.loop(max)
+	return p
+}
+
+func (p *WorkPool) tryStartWorker() {
+	runningWorkerNum := p.RunningWorkers()
+
+	if runningWorkerNum >= p.maxWorkerNum {
+		return
+	}
+
+
+	defer p.wg.Done()
+	// worker 开始干活
+	for wt := range p.task {
+		if wt == nil || atomic.LoadInt32(&p.closed) == 1 { // returns immediately,有err 立即返回
+			continue // It needs to be consumed before returning.需要先消费完了之后再返回，
+		}
+
+		closed := make(chan struct{}, 1)
+		// Set timeout, priority task timeout.有设置超时,优先task 的超时
+		if p.timeout > 0 {
+			ct, cancel := context.WithTimeout(context.Background(), p.timeout)
+			go func() {
+				select {
+				case <-ct.Done():
+					p.errChan <- ct.Err()
+					// if atomic.LoadInt32(&p.closed) != 1 {
+					// mylog.Error(ct.Err())
+					atomic.StoreInt32(&p.closed, 1)
+					cancel()
+				case <-closed:
+				}
+			}()
+		}
+
+		err := wt() // Points of Execution.真正执行的点
+		close(closed)
+		if err != nil {
+			select {
+			case p.errChan <- err:
+				// if atomic.LoadInt32(&p.closed) != 1 {
+				// mylog.Error(err)
+				atomic.StoreInt32(&p.closed, 1)
+			default:
+			}
+		}
+	}
+
+}
+
 // SetTimeout Setting timeout time
 func (p *WorkPool) SetTimeout(timeout time.Duration) { // 设置超时时间
 	p.timeout = timeout
@@ -124,6 +186,52 @@ func (p *WorkPool) waitTask() {
 	}
 }
 
+// func (p *WorkPool) loop(maxWorkersCount int) {
+// 	go p.startQueue() // Startup queue , 启动队列
+
+// 	// Start Max workers, 启动max个worker
+// 	for i := 0; i < maxWorkersCount; i++ {
+// 		go func() {
+// 			defer p.wg.Done()
+// 			// worker 开始干活
+// 			for wt := range p.task {
+// 				if wt == nil || atomic.LoadInt32(&p.closed) == 1 { // returns immediately,有err 立即返回
+// 					continue // It needs to be consumed before returning.需要先消费完了之后再返回，
+// 				}
+
+// 				closed := make(chan struct{}, 1)
+// 				// Set timeout, priority task timeout.有设置超时,优先task 的超时
+// 				if p.timeout > 0 {
+// 					ct, cancel := context.WithTimeout(context.Background(), p.timeout)
+// 					go func() {
+// 						select {
+// 						case <-ct.Done():
+// 							p.errChan <- ct.Err()
+// 							// if atomic.LoadInt32(&p.closed) != 1 {
+// 							// mylog.Error(ct.Err())
+// 							atomic.StoreInt32(&p.closed, 1)
+// 							cancel()
+// 						case <-closed:
+// 						}
+// 					}()
+// 				}
+
+// 				err := wt() // Points of Execution.真正执行的点
+// 				close(closed)
+// 				if err != nil {
+// 					select {
+// 					case p.errChan <- err:
+// 						// if atomic.LoadInt32(&p.closed) != 1 {
+// 						// mylog.Error(err)
+// 						atomic.StoreInt32(&p.closed, 1)
+// 					default:
+// 					}
+// 				}
+// 			}
+// 		}()
+// 	}
+// }
+
 func (p *WorkPool) loop(maxWorkersCount int) {
 	go p.startQueue() // Startup queue , 启动队列
 
@@ -168,4 +276,12 @@ func (p *WorkPool) loop(maxWorkersCount int) {
 			}
 		}()
 	}
+}
+
+func (p *WorkPool) RunningWorkers() int32 {
+	return atomic.LoadInt32(&p.runningWorkerNums
+}
+
+func (p *WorkPool) IdleWorkers() int32 {
+	return atomic.LoadInt32(&p.idleWorkerNum)
 }
